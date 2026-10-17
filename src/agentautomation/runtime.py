@@ -1,4 +1,4 @@
-"""Finite Fake Agent stages. n8n owns routing and polling, never this module."""
+"""Finite real and Fake stages. n8n owns routing and polling."""
 
 import asyncio
 import json
@@ -33,9 +33,10 @@ class Store:
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, document TEXT NOT NULL)")
         # Never pretend to resume an interrupted in-flight stage after a restart.
         for run in self.list():
-            if run.get("inflight") or run["status"] == "dispatching":
+            pending_operation = run.get("operation") and run["operation"]["request_id"] not in run["requests"]
+            if run["status"] not in TERMINAL and (run.get("inflight") or run["status"] == "dispatching" or pending_operation):
                 run["status"] = "interrupted"
-                run["error"] = "Runner restarted during an operation; start a new Fake run after inspection."
+                run["error"] = "Runner restarted during an operation; inspect processes, workspace and Git before starting another run."
                 run["inflight"] = None
                 self.save(run, "启动核对：中断运行已停止，等待人工检查")
 
@@ -75,17 +76,25 @@ class Store:
             ids = [row[0] for row in db.execute("SELECT id FROM runs ORDER BY rowid DESC LIMIT 100")]
         return [self.get(run_id) for run_id in ids]
 
-    def create(self, template, goal, max_concurrency=2, max_cycles=20, deadline_seconds=300):
+    def create(self, template, goal, max_concurrency=2, max_cycles=20, deadline_seconds=300, *, mode="fake", options=None):
+        if mode not in {"fake", "real"}:
+            raise RunnerError("未知执行模式", 422)
+        if mode == "real":
+            from .execution import validate_options
+            try:
+                options = validate_options(template, options or {})
+            except Exception as error:
+                raise RunnerError(str(error), 422) from error
         with self.lock:
-            if any(run["status"] not in TERMINAL for run in self.list()):
+            if any(run["status"] not in TERMINAL or run.get("inflight") for run in self.list()):
                 raise RunnerError("已有活动运行，请先完成或取消；当前仅支持一个活动项目")
             run = {"id": str(uuid.uuid4()), "template": template, "goal": goal,
-                   "mode": "fake", "status": "dispatching", "phase": "created", "revision": 0,
+                   "mode": mode, "options": options or {}, "status": "dispatching", "phase": "created", "revision": 0,
                    "max_concurrency": max_concurrency, "max_cycles": max_cycles, "cycles": 0,
                    "deadline": time.time() + deadline_seconds, "tasks": [], "approvals": [], "events": [],
                    "stages": {}, "requests": {}, "inflight": None, "blocked_by": None,
                    "n8n_execution_id": None, "error": None, "created_at": stamp()}
-            return self.save(run, "已创建 Fake 运行，等待 n8n webhook 接收")
+            return self.save(run, f"已创建 {mode} 运行，等待 n8n webhook 接收")
 
     def dispatch_result(self, run_id, error=None):
         with self.lock:
@@ -119,7 +128,7 @@ class Store:
             else:
                 run["status"] = "cancelled"
                 run["blocked_by"] = None
-            return self.save(run, {"pause": "已暂停新阶段启动", "resume": "已恢复，等待 n8n 下一次查询", "cancel": "已取消 Fake 运行"}[action])
+            return self.save(run, {"pause": "已暂停新阶段启动", "resume": "已恢复，等待 n8n 下一次查询", "cancel": "已请求取消运行；停止在途进程并保留工作区"}[action])
 
     def approve(self, run_id, approval_id, decision):
         with self.lock:
@@ -143,6 +152,12 @@ class Store:
 
     @staticmethod
     def candidate(run):
+        if run["mode"] == "real":
+            from .execution import content_candidate
+            import hashlib
+            evidence = {"content": content_candidate(run), "plan": run.get("plan"),
+                        "options": run.get("options"), "commit_sha": run.get("commit_sha")}
+            return hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         return f"{run['id']}:{run['phase']}"
 
     def require_approval(self, run, kind):
@@ -195,7 +210,9 @@ class Store:
             run["blocked_by"] = None
             run["cycles"] += 1
             run["status"] = "running"
-            self.save(run, f"n8n 启动有限阶段：{stage}（Fake，无 CLI/Git 副作用）")
+            self.save(run, f"n8n 启动有限阶段：{stage}（{run['mode']}）")
+        if run["mode"] == "real":
+            return await self.real_stage(run, stage, request_id)
         try:
             if stage == "code":
                 semaphore = asyncio.Semaphore(run["max_concurrency"])
@@ -268,3 +285,51 @@ class Store:
                     run["error"] = "阶段执行中断，需要人工检查"
                 self.save(run, "阶段执行中断")
             raise
+
+    async def real_stage(self, snapshot, stage, request_id):
+        from .execution import RealExecutor
+        from .process import ProcessError
+        try:
+            values = await RealExecutor(self).execute(snapshot, stage)
+            with self.lock:
+                current = self.get(snapshot["id"])
+                if current["status"] in TERMINAL:
+                    current["inflight"] = None
+                    return self.save(current, "运行已停止；外部工作区保留供检查，未推进阶段")
+                paused = current["status"] == "paused"
+                current.update(values)
+                current["phase"] = {"plan": "planned", "code": "coded", "check": "checked", "review": "reviewed",
+                                    "commit": "committed", "integrate": "integrated", "archive": "archived"}[stage]
+                if stage == "plan":
+                    self.add_approval(current, "plan")
+                elif stage == "commit":
+                    self.add_approval(current, "integration")
+                elif stage == "review" and current["template"] == "local-document":
+                    self.add_approval(current, "artifact")
+                elif stage == "archive":
+                    current["status"] = "completed"
+                for task in current["tasks"]:
+                    task["stage"] = current["phase"]
+                    if stage in {"commit", "archive"}:
+                        task["status"] = "completed"
+                if paused and current["status"] not in TERMINAL:
+                    current["status"] = "paused"
+                current["stages"][stage] = {"status": "completed", "at": stamp(), "source": "real"}
+                current["requests"][request_id] = stage
+                current["inflight"] = None
+                return self.save(current, f"{stage} 真实阶段完成")
+        except BaseException as error:
+            with self.lock:
+                current = self.get(snapshot["id"])
+                current["inflight"] = None
+                if current["status"] not in TERMINAL:
+                    current["status"] = ("timed_out" if isinstance(error, ProcessError) and error.kind == "timed_out"
+                                         else "interrupted" if isinstance(error, asyncio.CancelledError) else "failed")
+                    current["error"] = str(error) or type(error).__name__
+                for task in current["tasks"]:
+                    if task["status"] == "running":
+                        task["status"] = current["status"]
+                self.save(current, f"真实阶段 {stage} 停止：{current.get('error') or current['status']}；保留现场")
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            return current

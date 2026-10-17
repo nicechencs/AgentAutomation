@@ -46,7 +46,7 @@ def generate(template, stages):
         delay, post = "Wait 2s " + stage, "POST " + stage
         x, y = 500 + i * 1400, i * 180
         node(get, "httpRequest", 4.2, {"method": "GET",
-             "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+             "url": "={{ 'http://host.docker.internal:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
              "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
              "options": {"timeout": 10000, "response": {"response": {"responseFormat": "json", "neverError": False}}}},
              x, y, credentials=CREDENTIAL)
@@ -55,9 +55,10 @@ const runId = $('Validate webhook').first().json.run_id;
 const terminal = {json.dumps(TERMINAL)};
 const statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];
 const phases = {json.dumps(PHASES)};
-if (!run || run.id !== runId || run.template !== {json.dumps(template)} || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');
+if (!run || run.id !== runId || run.template !== {json.dumps(template)} || !['real','fake'].includes(run.mode)) throw new Error('Run identity/template/mode mismatch');
 if (!statuses.includes(run.status)) throw new Error('Unknown run status');
 if (terminal.includes(run.status)) return [{{json: {{...run, _gate: 'stop'}}}}];
+if (run.inflight != null && run.inflight !== {json.dumps(stage)}) throw new Error('Unexpected inflight stage');
 if (!phases.includes(run.phase) || ![{json.dumps(before)}, {json.dumps(after)}].includes(run.phase)) throw new Error('Illegal phase before {stage}');
 if (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');
 if (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');
@@ -65,12 +66,14 @@ if (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected 
 const pending = run.approvals.some(a => a.status === 'pending');
 if (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');
 const requestId = runId + ':{stage}';
+if (run.inflight === {json.dumps(stage)}) return [{{json: {{...run, _gate: 'wait'}}}}];
 if (run.phase === {json.dumps(after)}) {{
   if (!run.requests || run.requests[requestId] !== {json.dumps(stage)} || !run.stages || run.stages[{json.dumps(stage)}]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');
   return [{{json: {{...run, _gate: 'advance'}}}}];
 }}
-if (['review','commit','integrate','archive'].includes({json.dumps(stage)}) && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');
-if (['commit','integrate','archive'].includes({json.dumps(stage)}) && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');
+const candidatePresent = evidence => run.mode !== 'real' || (typeof evidence?.candidate === 'string' && evidence.candidate.trim().length > 0);
+if (['review','commit','integrate','archive'].includes({json.dumps(stage)}) && (run.checks?.status !== 'passed' || run.checks?.source !== run.mode || !candidatePresent(run.checks))) throw new Error('Missing passing check evidence for run mode');
+if (['commit','integrate','archive'].includes({json.dumps(stage)}) && (run.review?.verdict !== 'pass' || run.review?.source !== run.mode || !candidatePresent(run.review))) throw new Error('Missing passing review evidence for run mode');
 const requiredKind = {json.dumps(approval)};
 if (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');
 if (run.status === 'paused' || pending) return [{{json: {{...run, _gate: 'wait'}}}}];
@@ -84,7 +87,7 @@ return [{{json: {{...run, _gate: 'execute'}}}}];"""
         node(delay, "wait", 1.1, {"resume": "timeInterval", "amount": 2, "unit": "seconds"}, x+1100, y+130,
              webhookId="aa-wait-" + template + "-" + stage)
         node(post, "httpRequest", 4.2, {"method": "POST",
-             "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/" + stage + "' }}",
+             "url": "={{ 'http://host.docker.internal:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/" + stage + "' }}",
              "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
              "sendBody": True, "contentType": "json", "specifyBody": "json",
              "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':" + stage + "', execution_id: $execution.id } }}",

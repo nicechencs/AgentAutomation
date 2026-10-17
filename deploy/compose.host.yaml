@@ -1,0 +1,25 @@
+# Windows host Runner + containerized n8n. Use this file on its own.
+# No Runner service is started here; run deploy/start-runner.ps1 separately.
+name: agentautomation
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.43.7
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set a fixed user-supplied N8N_ENCRYPTION_KEY in deploy/.env}
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_WEBHOOK_URL: http://127.0.0.1:5678/
+      N8N_EDITOR_BASE_URL: http://127.0.0.1:5678/
+      EXECUTIONS_TIMEOUT: "3900"
+      EXECUTIONS_TIMEOUT_MAX: "3900"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ../workflows:/workflows:ro
+
+volumes:
+  n8n_data:
