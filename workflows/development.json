@@ -1,0 +1,2165 @@
+{
+  "id": "agentautomation-development",
+  "name": "AgentAutomation / development",
+  "active": false,
+  "nodes": [
+    {
+      "id": "production-webhook",
+      "name": "Production webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agentautomation-development",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": {
+            "values": {
+              "responseCode": 202
+            }
+          }
+        }
+      },
+      "webhookId": "agentautomation-development",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-webhook-header",
+          "name": "aa-webhook-header"
+        }
+      }
+    },
+    {
+      "id": "validate-webhook",
+      "name": "Validate webhook",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const body = $input.first().json.body;\nif (!body || typeof body.run_id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(body.run_id)) { throw new Error('Invalid webhook run_id'); }\nreturn [{json: {run_id: body.run_id}}];"
+      }
+    },
+    {
+      "id": "stopped-terminal",
+      "name": "Stopped terminal",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        220,
+        -300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "get-before-plan",
+      "name": "GET before plan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-plan",
+      "name": "Gate plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"created\", \"planned\"].includes(run.phase)) throw new Error('Illegal phase before plan');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':plan';\nif (run.phase === \"planned\") {\n  if (!run.requests || run.requests[requestId] !== \"plan\" || !run.stages || run.stages[\"plan\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"plan\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"plan\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = null;\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-plan",
+      "name": "Terminal plan",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal plan",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-plan",
+      "name": "Finished plan",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished plan",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-plan",
+      "name": "Waiting plan",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1380,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting plan",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-plan",
+      "name": "Wait 2s plan",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        130
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-plan"
+    },
+    {
+      "id": "post-plan",
+      "name": "POST plan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/plan' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':plan', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "get-before-code",
+      "name": "GET before code",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1900,
+        180
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-code-(plan-approval)",
+      "name": "Gate code (plan approval)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2120,
+        180
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"planned\", \"coded\"].includes(run.phase)) throw new Error('Illegal phase before code');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':code';\nif (run.phase === \"coded\") {\n  if (!run.requests || run.requests[requestId] !== \"code\" || !run.stages || run.stages[\"code\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"code\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"code\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = \"plan\";\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-code",
+      "name": "Terminal code",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2340,
+        180
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal code",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-code",
+      "name": "Finished code",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2560,
+        180
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished code",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-code",
+      "name": "Waiting code",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2780,
+        180
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting code",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-code",
+      "name": "Wait 2s code",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3000,
+        310
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-code"
+    },
+    {
+      "id": "post-code",
+      "name": "POST code",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3000,
+        180
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/code' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':code', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "get-before-check",
+      "name": "GET before check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3300,
+        360
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-check",
+      "name": "Gate check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3520,
+        360
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"coded\", \"checked\"].includes(run.phase)) throw new Error('Illegal phase before check');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':check';\nif (run.phase === \"checked\") {\n  if (!run.requests || run.requests[requestId] !== \"check\" || !run.stages || run.stages[\"check\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"check\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"check\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = null;\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-check",
+      "name": "Terminal check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3740,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal check",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-check",
+      "name": "Finished check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3960,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished check",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-check",
+      "name": "Waiting check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4180,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting check",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-check",
+      "name": "Wait 2s check",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        4400,
+        490
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-check"
+    },
+    {
+      "id": "post-check",
+      "name": "POST check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4400,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/check' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':check', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "get-before-review",
+      "name": "GET before review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4700,
+        540
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-review",
+      "name": "Gate review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4920,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"checked\", \"reviewed\"].includes(run.phase)) throw new Error('Illegal phase before review');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':review';\nif (run.phase === \"reviewed\") {\n  if (!run.requests || run.requests[requestId] !== \"review\" || !run.stages || run.stages[\"review\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"review\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"review\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = null;\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-review",
+      "name": "Terminal review",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5140,
+        540
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal review",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-review",
+      "name": "Finished review",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5360,
+        540
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished review",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-review",
+      "name": "Waiting review",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5580,
+        540
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting review",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-review",
+      "name": "Wait 2s review",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        5800,
+        670
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-review"
+    },
+    {
+      "id": "post-review",
+      "name": "POST review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5800,
+        540
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/review' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':review', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "get-before-commit",
+      "name": "GET before commit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6100,
+        720
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-commit",
+      "name": "Gate commit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6320,
+        720
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"reviewed\", \"committed\"].includes(run.phase)) throw new Error('Illegal phase before commit');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':commit';\nif (run.phase === \"committed\") {\n  if (!run.requests || run.requests[requestId] !== \"commit\" || !run.stages || run.stages[\"commit\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"commit\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"commit\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = null;\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-commit",
+      "name": "Terminal commit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6540,
+        720
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal commit",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-commit",
+      "name": "Finished commit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6760,
+        720
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished commit",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-commit",
+      "name": "Waiting commit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6980,
+        720
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting commit",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-commit",
+      "name": "Wait 2s commit",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        7200,
+        850
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-commit"
+    },
+    {
+      "id": "post-commit",
+      "name": "POST commit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7200,
+        720
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/commit' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':commit', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "get-before-integrate",
+      "name": "GET before integrate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7500,
+        900
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-integrate-(integration-approval)",
+      "name": "Gate integrate (integration approval)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7720,
+        900
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"committed\", \"integrated\"].includes(run.phase)) throw new Error('Illegal phase before integrate');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':integrate';\nif (run.phase === \"integrated\") {\n  if (!run.requests || run.requests[requestId] !== \"integrate\" || !run.stages || run.stages[\"integrate\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"integrate\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"integrate\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = \"integration\";\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-integrate",
+      "name": "Terminal integrate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        7940,
+        900
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal integrate",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-integrate",
+      "name": "Finished integrate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        8160,
+        900
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished integrate",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-integrate",
+      "name": "Waiting integrate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        8380,
+        900
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting integrate",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-integrate",
+      "name": "Wait 2s integrate",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        8600,
+        1030
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-integrate"
+    },
+    {
+      "id": "post-integrate",
+      "name": "POST integrate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        8600,
+        900
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/integrate' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':integrate', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "get-before-archive",
+      "name": "GET before archive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        8900,
+        1080
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "gate-archive",
+      "name": "Gate archive",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9120,
+        1080
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const run = $input.first().json;\nconst runId = $('Validate webhook').first().json.run_id;\nconst terminal = [\"completed\", \"rejected\", \"cancelled\", \"failed\", \"timed_out\", \"interrupted\"];\nconst statuses = ['dispatching', 'running', 'awaiting_approval', 'paused', ...terminal];\nconst phases = [\"created\", \"planned\", \"coded\", \"checked\", \"reviewed\", \"committed\", \"integrated\", \"archived\"];\nif (!run || run.id !== runId || run.template !== \"development\" || run.mode !== 'fake') throw new Error('Run identity/template/mode mismatch');\nif (!statuses.includes(run.status)) throw new Error('Unknown run status');\nif (terminal.includes(run.status)) return [{json: {...run, _gate: 'stop'}}];\nif (!phases.includes(run.phase) || ![\"integrated\", \"archived\"].includes(run.phase)) throw new Error('Illegal phase before archive');\nif (!Array.isArray(run.approvals) || run.approvals.some(a => !a || !['plan','integration','artifact'].includes(a.kind) || !['pending','approved','rejected'].includes(a.status))) throw new Error('Malformed approvals');\nif (new Set(run.approvals.map(a => a.kind)).size !== run.approvals.length) throw new Error('Duplicate approval kinds');\nif (run.approvals.some(a => a.status === 'rejected')) throw new Error('Rejected approval without terminal status');\nconst pending = run.approvals.some(a => a.status === 'pending');\nif (run.status === 'awaiting_approval' && !pending) throw new Error('Awaiting approval without pending approval');\nconst requestId = runId + ':archive';\nif (run.phase === \"archived\") {\n  if (!run.requests || run.requests[requestId] !== \"archive\" || !run.stages || run.stages[\"archive\"]?.status !== 'completed') throw new Error('Phase advanced without matching stage receipt');\n  return [{json: {...run, _gate: 'advance'}}];\n}\nif (['review','commit','integrate','archive'].includes(\"archive\") && (run.checks?.status !== 'passed' || run.checks?.source !== 'fake')) throw new Error('Missing passing Fake check');\nif (['commit','integrate','archive'].includes(\"archive\") && (run.review?.verdict !== 'pass' || run.review?.source !== 'fake')) throw new Error('Missing passing Fake review');\nconst requiredKind = null;\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind)) throw new Error('Missing required approval');\nif (run.status === 'paused' || pending) return [{json: {...run, _gate: 'wait'}}];\nif (!['dispatching','running'].includes(run.status)) throw new Error('Illegal executable status');\nif (requiredKind && !run.approvals.some(a => a.kind === requiredKind && a.status === 'approved')) throw new Error('Required approval not approved');\nreturn [{json: {...run, _gate: 'execute'}}];"
+      }
+    },
+    {
+      "id": "terminal-archive",
+      "name": "Terminal archive",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        9340,
+        1080
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Terminal archive",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "stop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "finished-archive",
+      "name": "Finished archive",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        9560,
+        1080
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Finished archive",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "advance",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waiting-archive",
+      "name": "Waiting archive",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        9780,
+        1080
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Waiting archive",
+              "leftValue": "={{ $json._gate }}",
+              "rightValue": "wait",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "wait-2s-archive",
+      "name": "Wait 2s archive",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        10000,
+        1210
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "aa-wait-development-archive"
+    },
+    {
+      "id": "post-archive",
+      "name": "POST archive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        10000,
+        1080
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://runner:8000/api/runs/' + encodeURIComponent($('Validate webhook').first().json.run_id) + '/stages/archive' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { request_id: $('Validate webhook').first().json.run_id + ':archive', execution_id: $execution.id } }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "neverError": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aa-runner-header",
+          "name": "aa-runner-header"
+        }
+      }
+    },
+    {
+      "id": "unexpected-nonterminal-archive",
+      "name": "Unexpected nonterminal archive",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        10300,
+        0
+      ],
+      "parameters": {
+        "errorType": "errorMessage",
+        "errorMessage": "Archive receipt must have terminal status"
+      }
+    }
+  ],
+  "connections": {
+    "Production webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate webhook": {
+      "main": [
+        [
+          {
+            "node": "GET before plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before plan": {
+      "main": [
+        [
+          {
+            "node": "Gate plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate plan": {
+      "main": [
+        [
+          {
+            "node": "Terminal plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal plan": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished plan": {
+      "main": [
+        [
+          {
+            "node": "GET before code",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting plan": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s plan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s plan": {
+      "main": [
+        [
+          {
+            "node": "GET before plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST plan": {
+      "main": [
+        [
+          {
+            "node": "GET before plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before code": {
+      "main": [
+        [
+          {
+            "node": "Gate code (plan approval)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate code (plan approval)": {
+      "main": [
+        [
+          {
+            "node": "Terminal code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal code": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished code": {
+      "main": [
+        [
+          {
+            "node": "GET before check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting code": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s code",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s code": {
+      "main": [
+        [
+          {
+            "node": "GET before code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST code": {
+      "main": [
+        [
+          {
+            "node": "GET before code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before check": {
+      "main": [
+        [
+          {
+            "node": "Gate check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate check": {
+      "main": [
+        [
+          {
+            "node": "Terminal check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal check": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished check": {
+      "main": [
+        [
+          {
+            "node": "GET before review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting check": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s check": {
+      "main": [
+        [
+          {
+            "node": "GET before check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST check": {
+      "main": [
+        [
+          {
+            "node": "GET before check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before review": {
+      "main": [
+        [
+          {
+            "node": "Gate review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate review": {
+      "main": [
+        [
+          {
+            "node": "Terminal review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal review": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished review": {
+      "main": [
+        [
+          {
+            "node": "GET before commit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting review": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s review": {
+      "main": [
+        [
+          {
+            "node": "GET before review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST review": {
+      "main": [
+        [
+          {
+            "node": "GET before review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before commit": {
+      "main": [
+        [
+          {
+            "node": "Gate commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate commit": {
+      "main": [
+        [
+          {
+            "node": "Terminal commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal commit": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished commit": {
+      "main": [
+        [
+          {
+            "node": "GET before integrate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting commit": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s commit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s commit": {
+      "main": [
+        [
+          {
+            "node": "GET before commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST commit": {
+      "main": [
+        [
+          {
+            "node": "GET before commit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before integrate": {
+      "main": [
+        [
+          {
+            "node": "Gate integrate (integration approval)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate integrate (integration approval)": {
+      "main": [
+        [
+          {
+            "node": "Terminal integrate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal integrate": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished integrate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished integrate": {
+      "main": [
+        [
+          {
+            "node": "GET before archive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting integrate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting integrate": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s integrate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST integrate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s integrate": {
+      "main": [
+        [
+          {
+            "node": "GET before integrate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST integrate": {
+      "main": [
+        [
+          {
+            "node": "GET before integrate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET before archive": {
+      "main": [
+        [
+          {
+            "node": "Gate archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gate archive": {
+      "main": [
+        [
+          {
+            "node": "Terminal archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Terminal archive": {
+      "main": [
+        [
+          {
+            "node": "Stopped terminal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finished archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finished archive": {
+      "main": [
+        [
+          {
+            "node": "Unexpected nonterminal archive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Waiting archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Waiting archive": {
+      "main": [
+        [
+          {
+            "node": "Wait 2s archive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 2s archive": {
+      "main": [
+        [
+          {
+            "node": "GET before archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST archive": {
+      "main": [
+        [
+          {
+            "node": "GET before archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3900
+  },
+  "pinData": {},
+  "tags": []
+}

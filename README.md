@@ -2,7 +2,33 @@
 
 本地自托管的 Agent 任务自动化系统，使用 n8n 编排、Python/FastAPI Runner 执行、SQLite 持久化，计划接入 Claude Code CLI 和 OpenAI Codex CLI。
 
-当前仅完成需求文档，尚未实现或验证真实 CLI、部署与平台能力。
+当前已有需求文档、UI 交互原型、持久化 Fake Runner，以及两条 n8n 工作流和 Compose 配置。Runner/API 与 UI 接线已测试；n8n 工作流尚未完成凭据配置、导入发布及端到端验证。真实 CLI 和 Git 自动化尚未实现。
+
+## UI 预览
+
+```sh
+npm --prefix ui run dev
+```
+
+打开 http://127.0.0.1:4173 ，无需安装运行依赖。可体验任务详情、新建任务、Agent/模型配置、流程节点、审批、集成与安全清理等交互。所有操作仅在浏览器内模拟，刷新重置。详见 [原型运行与走查说明](ui/README.md)。
+
+## n8n 接入与 Fake Runner
+
+```sh
+python -m pip install -e .
+python -m uvicorn agentautomation.app:app --app-dir src --host 127.0.0.1 --port 8000
+```
+
+打开 http://127.0.0.1:8000/#runner 。此入口使用真实 API 和 SQLite；缺少 n8n 配置时会显示未就绪并禁用创建，不会静默回退到演示。默认数据库位于 `.local/runner/`，可通过 `DATA_DIR` 覆盖。API 文档在 `/api/docs`。
+
+完整容器拓扑、两条模板、Header Auth 凭据和发布步骤见 [n8n 接入说明](docs/n8n-integration.md)。本轮容器 Runner 仅用于 Fake 接入验证；生产主机 CLI、Review/Fix 循环和真实 Git 门禁仍待后续开发。原“流程编排”页面的编辑不会修改已导入的 n8n 工作流。
+
+后端测试（PowerShell）：
+
+```powershell
+$env:PYTHONPATH = 'src'
+python -m unittest discover -s tests -v
+```
 
 ## 首版范围
 
@@ -18,7 +44,7 @@
 
 ## 文档入口
 
-- [首版开发计划](docs/development-plan.md)：11 个实现任务、依赖与并行分工、5 个里程碑及验收映射；任务尚未开始。
+- [首版开发计划](docs/development-plan.md)：11 个实现任务、依赖与并行分工、5 个里程碑及验收映射；已先完成 UI 并实现 Fake Runner/n8n 接入薄层，完整后端里程碑尚未达成。
 - [当前需求基线](docs/requirements-current.md)：首版正式范围、默认策略及后置能力，是当前需求的唯一基线。
 - [分阶段验收清单](docs/acceptance-criteria.md)：区分首版必过、能力引入时必过和后续增强；尚未执行测试。
 - [设计取舍](docs/requirements-analysis.md)：说明简化原因，不再维护重复的需求或验收矩阵。

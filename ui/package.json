@@ -1,0 +1,11 @@
+{
+  "name": "agentautomation-ui-preview",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "check": "node --check src/app.js && node --check src/demo.js && node --check src/runner.js && node --check server.mjs"
+  }
+}

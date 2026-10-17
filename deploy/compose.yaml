@@ -1,0 +1,41 @@
+name: agentautomation
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.43.7
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set a fixed user-supplied N8N_ENCRYPTION_KEY in deploy/.env}
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_WEBHOOK_URL: http://127.0.0.1:5678/
+      N8N_EDITOR_BASE_URL: http://127.0.0.1:5678/
+      EXECUTIONS_TIMEOUT: "3900"
+      EXECUTIONS_TIMEOUT_MAX: "3900"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ../workflows:/workflows:ro
+
+  runner:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${RUNNER_HTTP_PORT:-8000}:8000"
+    environment:
+      DATA_DIR: /data
+      N8N_WEBHOOK_BASE: http://n8n:5678/webhook
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set user-supplied RUNNER_TOKEN in deploy/.env}
+      WORKFLOW_TOKEN: ${WORKFLOW_TOKEN:?Set user-supplied WORKFLOW_TOKEN in deploy/.env}
+    volumes:
+      - runner_data:/data
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:
+  runner_data:
